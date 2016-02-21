@@ -18,3 +18,11 @@ _build/
 # oasis generated files
 setup.data
 setup.log
+
+# emacs
+*~
+\#*#
+
+# build
+._d/
+1w
