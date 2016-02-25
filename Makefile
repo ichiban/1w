@@ -1,6 +1,6 @@
 RESULT = 1w
 SOURCES = \
-  configuration.ml \
+  config.ml \
   httpParser.ml \
   connection.ml \
   main.ml

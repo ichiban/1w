@@ -1,7 +1,5 @@
 open Batteries
 
-let strict = true
-
 let connection = "connection"
 let content_length = "content-length"
 let transfer_encoding = "transfer-encoding"
@@ -53,7 +51,7 @@ let unhex =
 let normal_uri_char =
   let yes = true in
   let ___ = false in
-  let meh = not strict in
+  let meh = not Config.strict in
   [| ___; ___; ___; ___; ___; ___; ___; ___;
      ___; meh; ___; ___; meh; ___; ___; ___;
      ___; ___; ___; ___; ___; ___; ___; ___;
@@ -226,7 +224,7 @@ let strict_token c =
 					      
 let token c =
   let result = Char.code c |> Array.get tokens in
-  if strict then
+  if Config.strict then
     result
   else if c = ' ' then
     ' '
@@ -241,7 +239,7 @@ let is_uri_char c =
   try
     Array.get normal_uri_char code
   with
-    Invalid_argument _ -> not strict
+    Invalid_argument _ -> not Config.strict
 
 let unhex c =
   try
@@ -250,11 +248,11 @@ let unhex c =
     Invalid_argument _ -> -1
 
 let strict_check cond =
-  if strict && not cond then
+  if Config.strict && not cond then
     raise Strict
 
 let new_message flags =
-  if strict && flags.connection_close then
+  if Config.strict && flags.connection_close then
     Dead
   else
     Start
@@ -277,7 +275,7 @@ let rec parse_message_char callbacks data state p =
      parse_message_char callbacks data MethodStart p
   | MethodStart, ch when is_token ch -> Method (1, p)
   | MethodStart, _ -> raise InvalidMethod
-  | Method (n, m), _ when n >= Configuration.max_method_size ->
+  | Method (n, m), _ when n >= Config.max_method_size ->
      raise InvalidMethod
   | Method (n, m), ' ' ->
      callbacks.on_method data m p;
@@ -292,7 +290,7 @@ let rec parse_message_char callbacks data state p =
      callbacks.on_uri data m p;
      HttpStart
   | Asterisk m, _ -> raise InvalidUri
-  | Uri (n, m), _ when n >= Configuration.max_uri_size ->
+  | Uri (n, m), _ when n >= Config.max_uri_size ->
      raise InvalidUri
   | Uri (n, m), ' ' ->
      callbacks.on_uri data m p;
@@ -316,7 +314,7 @@ let rec parse_message_char callbacks data state p =
      MajorFirst
   | MajorFirst, ch when is_num ch -> Major (1, p)
   | MajorFirst, _ -> raise InvalidVersion
-  | Major (n, m), _ when n >= Configuration.max_version_digit_size ->
+  | Major (n, m), _ when n >= Config.max_version_digit_size ->
      raise InvalidVersion
   | Major (n, m), '.' ->
      callbacks.on_version_major data m p;
@@ -325,7 +323,7 @@ let rec parse_message_char callbacks data state p =
   | Major _, _ -> raise InvalidVersion
   | MinorFirst, ch when is_num ch -> Minor (1, p)
   | MinorFirst, _ -> raise InvalidVersion
-  | Minor (n, m), _ when n >= Configuration.max_version_digit_size ->
+  | Minor (n, m), _ when n >= Config.max_version_digit_size ->
      raise InvalidVersion
   | Minor (n, m), '\r' ->
      callbacks.on_version_minor data m p;
@@ -345,7 +343,7 @@ let rec parse_message_char callbacks data state p =
   | HeaderValue (n, flags, cl, _, _), _
   | HeaderValueLws (n, flags, cl, _), _
   | HeaderAlmostDone (n, flags, cl, _), _
-       when n >= Configuration.max_header_size ->
+       when n >= Config.max_header_size ->
      raise HeaderOverflow;
   | HeaderFieldStart (flags, cl), '\r' -> HeadersAlmostDone (flags, cl)
   | HeaderFieldStart (flags, cl), '\n' ->
@@ -480,7 +478,7 @@ let rec parse_message_char callbacks data state p =
      raise InvalidContentLength
   | HeaderValue (n, flags, Some cl, ContentLength, m), ch ->
      let content_length = 10 * cl + digit ch in
-     if Configuration.max_content_size < content_length then
+     if Config.max_content_size < content_length then
        raise InvalidContentLength;
      HeaderValue (n + 1, flags, Some content_length, ContentLength, m)
   | HeaderValue (n, flags, cl, MatchingTransferEncodingChunked i, m), ch
@@ -569,7 +567,7 @@ let rec parse_message_char callbacks data state p =
   | HeaderAlmostDone (n, flags, cl, hs), '\n' ->
      HeaderValueLws (n + 1, flags, cl, hs)
   | HeaderAlmostDone (n, flags, cl, hs), _ ->
-     if strict then
+     if Config.strict then
        raise Strict;
      HeaderValueLws (n + 1, flags, cl, hs)
   | HeaderValueLws (n, flags, cl, hs), ' '
@@ -600,17 +598,17 @@ let rec parse_message_char callbacks data state p =
      strict_check (ch = '\n');
      callbacks.on_headers_complete ();
      parse_message_char callbacks data (HeadersDone (flags, cl)) p
-  | HeadersDone (flags, Some 0), _ ->
-     callbacks.on_message_complete ();
-     new_message flags
   | HeadersDone ({ upgrade = true; connection_upgrade = true; _ } as flags, _), _
   | HeadersDone ({ chunked = true; _ } as flags, Some _), _ ->
      (* Exit, the rest of the message is in a different protocol. *)
      callbacks.on_message_complete ();
      new_message flags
   | HeadersDone ({ chunked = true; _ }, _), _ -> ChunkSizeStart
+  | HeadersDone (flags, Some 0), _
+  | HeadersDone (flags, None), _ ->
+     callbacks.on_message_complete ();
+     new_message flags
   | HeadersDone (flags, Some cl), _ -> BodyIdentity (cl, p)
-  | HeadersDone (flags, _), _ -> BodyIdentityEof p
   | BodyIdentity (0, m), _ ->
      callbacks.on_body data m (p - 1);
      parse_message_char callbacks data MessageDone p
@@ -632,7 +630,7 @@ let rec parse_message_char callbacks data state p =
      if unhex_val = -1 then
        raise InvalidChunkSize;
      let size = 16 * size + unhex_val in
-     if Configuration.max_chunk_size < size then
+     if Config.max_chunk_size < size then
        raise InvalidChunkSize;
      ChunkSize size
   | ChunkParameters size, '\r' -> ChunkSizeAlmostDone size
@@ -705,3 +703,51 @@ let execute parser data len =
   parser.nread <- parser.nread + len;
   let state = reset_mark parser data last_place in
   parser.state <- state
+
+let is_message_done parser =
+  match parser.state with
+  | MessageDone -> true
+  | _ -> false
+
+let state_to_string = function
+  | Dead -> "Dead"
+  | Start -> "Start"
+  | MethodStart -> "MethodStart"
+  | Method _ -> "Method"
+  | SpacesBeforeUri -> "SpacesBeforeUri"
+  | Asterisk _ -> "Asterisk"
+  | Uri _ -> "Uri"
+  | HttpStart -> "HttpStart"
+  | H -> "H"
+  | Ht -> "Ht"
+  | Htt -> "Htt"
+  | Http -> "Http"
+  | MajorFirst -> "MajorFirst"
+  | Major _ -> "Major"
+  | MinorFirst -> "MinorFirst"
+  | Minor _ -> "Minor"
+  | LineAlmostDone -> "LineAlmostDone"
+  | HeaderFieldStart _ -> "HeaderFieldStart"
+  | HeaderField _ -> "HeaderField"
+  | HeaderValueDiscardWs _ -> "HeaderValueDiscardWs"
+  | HeaderValueDiscardWsAlmostDone _ -> "HeaderValueDiscardWsAlmostDone"
+  | HeaderValueDiscardLws _ -> "HeaderValueDiscardLws"
+  | HeaderValueStart _ -> "HeaderValueStart"
+  | HeaderValue _ -> "HeaderValue"
+  | HeaderValueLws _ -> "HeaderValueLws"
+  | HeaderAlmostDone _ -> "HeaderAlmostDone"
+  | ChunkSizeStart -> "ChunkSizeStart"
+  | ChunkSize _ -> "ChunkSize"
+  | ChunkParameters _ -> "ChunkParameters"
+  | ChunkSizeAlmostDone _ -> "ChunkSizeAlmostDone"
+  | HeadersAlmostDone _ -> "HeadersAlmostDone"
+  | HeadersDone _ -> "HeadersDone"
+  | ChunkData _ -> "ChunkData"
+  | ChunkDataAlmostDone _ -> "ChunkDataAlmostDone"
+  | ChunkDataDone -> "ChunkDataDone"
+  | BodyIdentity _ -> "BodyIdentity"
+  | BodyIdentityEof _ -> "BodyIdentityEof"
+  | MessageDone -> "MessageDone"
+	  
+let to_string parser =
+  state_to_string parser.state

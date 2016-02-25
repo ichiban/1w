@@ -1,4 +1,5 @@
 val buffer_size : int
+val strict : bool
 val max_method_size : int
 val max_uri_size : int
 val max_version_digit_size : int

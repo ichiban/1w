@@ -19,3 +19,4 @@ type callbacks =
 
 val make : callbacks -> t
 val execute : t -> string -> int -> unit
+val to_string : t -> string

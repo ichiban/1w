@@ -3,11 +3,7 @@ open Lwt
 
 let accept_connection fd =
   let connection = Connection.of_fd fd in
-  let print_error e = Printexc.to_string e |> Lwt_log_core.ign_error in
-  Lwt.on_failure
-    (Connection.run connection)
-    print_error;
-  Lwt_log_core.info "New connection" >>= return
+  Connection.run connection ()
 
 let server sock =
   let rec serve () =
@@ -20,10 +16,10 @@ let server sock =
 let socket =
   let fd = Lwt_unix.socket Lwt_unix.PF_INET Lwt_unix.SOCK_STREAM 0 in
   let sockaddr =
-    Lwt_unix.ADDR_INET (Configuration.address, Configuration.port)
+    Lwt_unix.ADDR_INET (Config.address, Config.port)
   in
   Lwt_unix.bind fd sockaddr;
-  Lwt_unix.listen fd Configuration.backlog;
+  Lwt_unix.listen fd Config.backlog;
   fd
 
 let () =
