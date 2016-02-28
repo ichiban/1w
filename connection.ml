@@ -7,7 +7,6 @@ type t =
     output_channel : Lwt_io.output Lwt_io.channel;
     parser : HttpParser.t;
     buffer : String.t;
-    request : unit Lwt.t;
   }
 
 let notify label () =
@@ -18,7 +17,16 @@ let data label data b e =
   let str = Substring.to_string sub in
   Printf.printf "%s:\t\"%s\"\n%!" label str
 
-let callbacks req_wakener =
+let write_if_possible oc =
+  let message = String.join "\r\n" ["HTTP/1.1 200 OK";
+				    "Content-Type: text/plain";
+				    "Content-Length: 13";
+				    "";
+				    "Hello, World!"] in
+  Lwt_io.write oc message
+  >>= const @@ Lwt_io.flush oc
+
+let callbacks oc =
   HttpParser.{
       on_message_begin = notify "message begin";
       on_method = data "method";
@@ -30,7 +38,9 @@ let callbacks req_wakener =
       on_headers_complete = notify "header complete";
       on_body = data "body";
       on_message_complete = (fun () ->
-			     wakeup req_wakener ();
+			     on_failure
+			       (write_if_possible oc)
+			       ignore;
 			     notify "message complete" ()
 			    );
       on_chunk_header = notify "chunk header";
@@ -41,13 +51,11 @@ let buffer () =
   String.make Config.buffer_size '\000'
 
 let of_channels ic oc =
-  let req_waiter, req_wakener = wait () in
   {
     input_channel = ic;
     output_channel = oc;
-    parser = HttpParser.make @@ callbacks req_wakener;
+    parser = HttpParser.make @@ callbacks oc;
     buffer = buffer ();
-    request = req_waiter;
   }
 
 let of_fd fd =
@@ -65,21 +73,5 @@ let read connection =
   in
   Lwt_io.read_into ic buf 0 len >>= parse
 
-let write_if_possible connection =
-  let message = String.join "\r\n" ["HTTP/1.1 200 OK";
-				    "Content-Type: text/plain";
-				    "Content-Length: 13";
-				    "";
-				    "Hello, World!"] in
-  let parser = connection.parser in
-  connection.request
-  >>= const @@ begin
-      Printf.printf "state: %s\n%!" @@ HttpParser.to_string parser;
-      return ()
-    end
-  >>= const @@ Lwt_io.write connection.output_channel message
-  >>= const @@ Lwt_io.flush connection.output_channel
-
 let rec run connection () =
-  read connection <&> write_if_possible connection
-  >>= run connection
+  read connection >>= run connection
