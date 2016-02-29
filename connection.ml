@@ -1,6 +1,8 @@
 open Batteries
 open Lwt
 
+let (>>) x y = x >>= const y
+
 type t =
   {
     input_channel : Lwt_io.input Lwt_io.channel;
@@ -11,12 +13,11 @@ type t =
 
 let notify label () =
   Printf.printf "**** %s ****\n%!" label
-		
-let data label data b e =
-  let sub = Substring.substring data b (e - b) in
-  let str = Substring.to_string sub in
-  Printf.printf "%s:\t\"%s\"\n%!" label str
 
+let substring data b e =
+  let sub = Substring.substring data b (e - b) in
+  Substring.to_string sub
+		      
 let write_if_possible oc =
   let message = String.join "\r\n" ["HTTP/1.1 200 OK";
 				    "Content-Type: text/plain";
@@ -24,20 +25,40 @@ let write_if_possible oc =
 				    "";
 				    "Hello, World!"] in
   Lwt_io.write oc message
-  >>= const @@ Lwt_io.flush oc
+  >> Lwt_io.flush oc
 
 let callbacks oc =
+  let builder = ref Request.Builder.empty in
+  let with_sub f data b e =
+    let sub = substring data b e in
+    f sub
+  in
   HttpParser.{
-      on_message_begin = notify "message begin";
-      on_method = data "method";
-      on_uri = data "uri";
-      on_version_major = data "major";
-      on_version_minor = data "minor";
-      on_header_field = data "field";
-      on_header_value = data "value";
+      on_message_begin = (fun () -> builder := Request.Builder.empty);
+      on_method =
+	with_sub (fun sub -> builder := !builder
+					|> Request.Builder.with_method sub);
+      on_uri =
+	with_sub (fun sub -> builder := !builder
+					|> Request.Builder.with_uri sub);
+      on_version_major =
+	with_sub (fun sub -> builder := !builder
+					|> Request.Builder.with_major sub);
+      on_version_minor =
+	with_sub (fun sub -> builder := !builder
+					|> Request.Builder.with_minor sub);
+      on_header_field =
+	with_sub (fun sub -> builder := !builder
+					|> Request.Builder.with_field sub);
+      on_header_value =
+	with_sub (fun sub -> builder := !builder |>
+					  Request.Builder.with_value sub);
       on_headers_complete = notify "header complete";
-      on_body = data "body";
+      on_body =
+	with_sub (fun sub -> builder := !builder
+					|> Request.Builder.with_body sub);
       on_message_complete = (fun () ->
+			     let request = Request.Builder.to_request !builder in
 			     on_failure
 			       (write_if_possible oc)
 			       ignore;
