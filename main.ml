@@ -4,9 +4,8 @@ open Lwt
 let accept_connection fd =
   let connection = Connection.of_fd fd in
   on_failure
-    (Connection.run connection)
+    (Connection.run @@ Some connection)
     (fun e -> Lwt_log.ign_error (Printexc.to_string e));
-  Printf.printf "here!\n%!";
   return ()
 
 let server sock =

@@ -89,10 +89,18 @@ let read connection =
   let buf = connection.buffer in
   let len = String.length buf in
   let parse nread =
-    HttpParser.execute connection.parser buf nread;
-    return connection
+    if nread = 0 then
+      (* nread will be 0 when it's closed. *)
+      return None
+    else
+      begin
+	HttpParser.execute connection.parser buf nread;
+	return @@ Some connection
+      end
   in
   Lwt_io.read_into ic buf 0 len >>= parse
 
-let rec run connection =
-  read connection >>= run
+let rec run = function
+  | None -> return ()
+  | Some connection ->
+     read connection >>= run
