@@ -1,7 +1,7 @@
 open Batteries
 open Lwt
 
-let (>>) x y = x >>= const y
+let () = Lwt_log.add_rule "*" Lwt_log.Info
 
 type t =
   {
@@ -12,7 +12,9 @@ type t =
   }
 
 let notify label () =
-  Printf.printf "**** %s ****\n%!" label
+  on_failure
+    (Lwt_log.info_f "**** %s ****\n%!" label)
+    (fun e -> Lwt_log.ign_error (Printexc.to_string e))
 
 let substring data b e =
   let sub = Substring.substring data b (e - b) in
@@ -27,43 +29,33 @@ let handle req =
 			       
 let callbacks oc =
   let builder = ref Request.Builder.empty in
-  let with_sub f data b e =
+  let init () =
+    builder := Request.Builder.empty
+  in
+  let update_with_sub f data b e =
     let sub = substring data b e in
-    f sub
+    builder := f sub !builder
+  in
+  let handle_request () =
+    let request = Request.Builder.to_request !builder in
+    on_failure
+      (handle request
+       >>= Response.write oc
+       >> Lwt_io.flush oc)
+      (fun e -> Lwt_log.ign_error (Printexc.to_string e));
+    notify "message complete" ()
   in
   HttpParser.{
-      on_message_begin = (fun () -> builder := Request.Builder.empty);
-      on_method =
-	with_sub (fun sub -> builder := !builder
-					|> Request.Builder.with_method sub);
-      on_uri =
-	with_sub (fun sub -> builder := !builder
-					|> Request.Builder.with_uri sub);
-      on_version_major =
-	with_sub (fun sub -> builder := !builder
-					|> Request.Builder.with_major sub);
-      on_version_minor =
-	with_sub (fun sub -> builder := !builder
-					|> Request.Builder.with_minor sub);
-      on_header_field =
-	with_sub (fun sub -> builder := !builder
-					|> Request.Builder.with_field sub);
-      on_header_value =
-	with_sub (fun sub -> builder := !builder |>
-					  Request.Builder.with_value sub);
+      on_message_begin = init;
+      on_method = update_with_sub Request.Builder.with_method;
+      on_uri = update_with_sub Request.Builder.with_uri;
+      on_version_major = update_with_sub Request.Builder.with_major;
+      on_version_minor = update_with_sub Request.Builder.with_minor;
+      on_header_field = update_with_sub Request.Builder.with_field;
+      on_header_value = update_with_sub Request.Builder.with_value;
       on_headers_complete = notify "header complete";
-      on_body =
-	with_sub (fun sub -> builder := !builder
-					|> Request.Builder.with_body sub);
-      on_message_complete = (fun () ->
-			     let request = Request.Builder.to_request !builder in
-			     on_failure
-			       (handle request
-				>>= Response.write oc
-				>> Lwt_io.flush oc)
-			       (fun e -> Lwt_log.ign_error (Printexc.to_string e));
-			     notify "message complete" ()
-			    );
+      on_body = update_with_sub Request.Builder.with_body;
+      on_message_complete = handle_request;
       on_chunk_header = notify "chunk header";
       on_chunk_complete = notify "chunk complete";
   }
