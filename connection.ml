@@ -18,15 +18,13 @@ let substring data b e =
   let sub = Substring.substring data b (e - b) in
   Substring.to_string sub
 		      
-let write_if_possible oc =
-  let message = String.join "\r\n" ["HTTP/1.1 200 OK";
-				    "Content-Type: text/plain";
-				    "Content-Length: 13";
-				    "";
-				    "Hello, World!"] in
-  Lwt_io.write oc message
-  >> Lwt_io.flush oc
-
+let handle req =
+  return @@ Response.of_string "Hello, World!"
+			       ~code:200
+			       ~headers:["Server", "1w";
+					 "Content-Type", "text/plain";
+					 "Content-Length", "13"]
+			       
 let callbacks oc =
   let builder = ref Request.Builder.empty in
   let with_sub f data b e =
@@ -60,8 +58,10 @@ let callbacks oc =
       on_message_complete = (fun () ->
 			     let request = Request.Builder.to_request !builder in
 			     on_failure
-			       (write_if_possible oc)
-			       ignore;
+			       (handle request
+				>>= Response.write oc
+				>> Lwt_io.flush oc)
+			       (fun e -> Lwt_log.ign_error (Printexc.to_string e));
 			     notify "message complete" ()
 			    );
       on_chunk_header = notify "chunk header";
@@ -90,9 +90,9 @@ let read connection =
   let len = String.length buf in
   let parse nread =
     HttpParser.execute connection.parser buf nread;
-    return ()
+    return connection
   in
   Lwt_io.read_into ic buf 0 len >>= parse
 
-let rec run connection () =
-  read connection >>= run connection
+let rec run connection =
+  read connection >>= run

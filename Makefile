@@ -3,12 +3,14 @@ SOURCES = \
   config.ml \
   httpParser.ml \
   request.ml \
+  response.ml \
   connection.ml \
   main.ml
 PACKS = \
   batteries \
   lwt \
   lwt.unix \
+  lwt.ppx \
   uri
 OCAMLFLAGS = -g
 OCAMLLDFLAGS = -g
