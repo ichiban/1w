@@ -10,17 +10,17 @@ let accept_connection fd =
 
 let server sock =
   let rec serve () =
-    Lwt_unix.accept sock
-    >>= Tuple2.first %> accept_connection
+    let%lwt fd, address = Lwt_unix.accept sock in
+    let%lwt _ = accept_connection fd in
+    let%lwt name_info = Lwt_unix.getnameinfo address [] in
+    Lwt_log.info_f "accept: %s" name_info.Lwt_unix.ni_hostname
     >>= serve
   in
   serve ()
 
 let socket () =
   let fd = Lwt_unix.socket Lwt_unix.PF_INET Lwt_unix.SOCK_STREAM 0 in
-  let sockaddr =
-    Lwt_unix.ADDR_INET (Config.address, Config.port)
-  in
+  let sockaddr = Lwt_unix.ADDR_INET (Config.address, Config.port) in
   Lwt_unix.bind fd sockaddr;
   Lwt_unix.listen fd Config.backlog;
   fd
