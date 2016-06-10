@@ -5,6 +5,8 @@ let () = Lwt_log.add_rule "*" Lwt_log.Info
 
 type t =
   {
+    handler : Handler.t;
+    address : Unix.sockaddr;
     input_channel : Lwt_io.input Lwt_io.channel;
     output_channel : Lwt_io.output Lwt_io.channel;
     parser : HttpParser.t;
@@ -20,14 +22,7 @@ let substring data b e =
   let sub = Substring.substring data b (e - b) in
   Substring.to_string sub
 		      
-let handle req =
-  return @@ Response.of_string "Hello, World!"
-			       ~code:200
-			       ~headers:["Server", "1w";
-					 "Content-Type", "text/plain";
-					 "Content-Length", "13"]
-			       
-let callbacks oc =
+let callbacks handle oc =
   let builder = ref Request.Builder.empty in
   let init () =
     builder := Request.Builder.empty
@@ -63,36 +58,40 @@ let callbacks oc =
 let buffer () =
   String.make Config.buffer_size '\000'
 
-let of_channels ic oc =
-  {
-    input_channel = ic;
-    output_channel = oc;
-    parser = HttpParser.make @@ callbacks oc;
-    buffer = buffer ();
-  }
-
-let of_fd fd =
+let of_socket_and_handler socket handler =
+  let%lwt fd, address = Lwt_unix.accept socket in
   let ic = Lwt_io.of_fd Lwt_io.Input fd in
   let oc = Lwt_io.of_fd Lwt_io.Output fd in
-  of_channels ic oc
+  let connection =
+    {
+      handler = handler;
+      address = address;
+      input_channel = ic;
+      output_channel = oc;
+      parser = HttpParser.make @@ callbacks handler oc;
+      buffer = buffer ();
+    }
+  in
+  let%lwt name_info = Lwt_unix.getnameinfo address [] in
+  let%lwt _ = Lwt_log.info_f "accept: %s" name_info.Lwt_unix.ni_hostname in
+  return connection
 
-let read connection =
-  let ic = connection.input_channel in
-  let buf = connection.buffer in
-  let len = String.length buf in
-  let parse nread =
+exception Closed
+
+let run con =
+  let rec read () =
+    let ic = con.input_channel in
+    let buf = con.buffer in
+    let len = String.length buf in
+    let%lwt nread = Lwt_io.read_into ic buf 0 len in
     if nread = 0 then
       (* nread will be 0 when it's closed. *)
-      return None
+      fail Closed
     else
       begin
-	HttpParser.execute connection.parser buf nread;
-	return @@ Some connection
+	HttpParser.execute con.parser buf nread;
+	return ()
+	>>= read
       end
   in
-  Lwt_io.read_into ic buf 0 len >>= parse
-
-let rec run = function
-  | None -> return ()
-  | Some connection ->
-     read connection >>= run
+  read ()

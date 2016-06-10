@@ -4,7 +4,9 @@ SOURCES = \
   httpParser.ml \
   request.ml \
   response.ml \
+  handler.ml \
   connection.ml \
+  server.ml \
   main.ml
 PACKS = \
   batteries \
