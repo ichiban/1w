@@ -7,7 +7,7 @@ let upgrade = "upgrade"
 let chunked = "chunked"
 let keep_alive = "keep-alive"
 let close = "close"
-
+	      
 let invalid_token = '\000'
 let tokens =
   let ___ = invalid_token in
@@ -89,19 +89,19 @@ type header_state =
   | C
   | Co
   | Con
-  | MatchingConnection of index
-  | MatchingContentLength of index
-  | MatchingTransferEncoding of index
-  | MatchingUpgrade of index
+  | MatchingConnection
+  | MatchingContentLength
+  | MatchingTransferEncoding
+  | MatchingUpgrade
   | Connection
   | ContentLength
   | TransferEncoding
   | Upgrade
-  | MatchingTransferEncodingChunked of index
+  | MatchingTransferEncodingChunked
   | MatchingConnectionTokenStart
-  | MatchingConnectionKeepAlive of index
-  | MatchingConnectionClose of index
-  | MatchingConnectionUpgrade of index
+  | MatchingConnectionKeepAlive
+  | MatchingConnectionClose
+  | MatchingConnectionUpgrade
   | MatchingConnectionToken
   | TransferEncodingChunked
   | ConnectionKeepAlive
@@ -112,40 +112,40 @@ type state =
   | Dead
   | Start
   | MethodStart
-  | Method of nread * mark
+  | Method
   | SpacesBeforeUri
-  | Asterisk of mark
-  | Uri of nread * mark
+  | Asterisk
+  | Uri
   | HttpStart
   | H
   | Ht
   | Htt
   | Http
   | MajorFirst
-  | Major of nread * mark
+  | Major
   | MinorFirst
-  | Minor of nread * mark
+  | Minor
   | LineAlmostDone
-  | HeaderFieldStart of flags * content_length
-  | HeaderField of nread * flags * content_length * header_state * mark
-  | HeaderValueDiscardWs of nread * flags * content_length * header_state
-  | HeaderValueDiscardWsAlmostDone of nread * flags * content_length * header_state
-  | HeaderValueDiscardLws of nread * flags * content_length * header_state
-  | HeaderValueStart of nread * flags * content_length * header_state
-  | HeaderValue of nread * flags * content_length * header_state * mark
-  | HeaderValueLws of nread * flags * content_length * header_state
-  | HeaderAlmostDone of nread * flags * content_length * header_state
+  | HeaderFieldStart
+  | HeaderField
+  | HeaderValueDiscardWs
+  | HeaderValueDiscardWsAlmostDone
+  | HeaderValueDiscardLws
+  | HeaderValueStart
+  | HeaderValue
+  | HeaderValueLws
+  | HeaderAlmostDone
   | ChunkSizeStart
-  | ChunkSize of size
-  | ChunkParameters of size
-  | ChunkSizeAlmostDone of size
-  | HeadersAlmostDone of flags * content_length
-  | HeadersDone of flags * content_length
-  | ChunkData of size * mark
-  | ChunkDataAlmostDone of mark
+  | ChunkSize
+  | ChunkParameters
+  | ChunkSizeAlmostDone
+  | HeadersAlmostDone
+  | HeadersDone
+  | ChunkData
+  | ChunkDataAlmostDone
   | ChunkDataDone
-  | BodyIdentity of index * mark
-  | BodyIdentityEof of mark
+  | BodyIdentity
+  | BodyIdentityEof
   | MessageDone
 
 exception HeaderOverflow
@@ -160,19 +160,6 @@ exception InvalidChunkSize
 exception InvalidConstant
 exception Strict
 	    
-let empty_flags =
-  {
-    chunked = false;
-    connection_keep_alive = false;
-    connection_close = false;
-    connection_upgrade = false;
-    trailing = false;
-    upgrade = false;
-  }
-
-let trailing_flags =
-  { empty_flags with trailing = true }
-
 type data_callback = string -> int -> int -> unit
 type callback = unit -> unit
 type callbacks =
@@ -194,10 +181,40 @@ type callbacks =
 type t = {
     mutable state : state;
     mutable nread : nread;
+    mutable mark : int;
+    mutable count : int;
+    mutable content_length : int;
+    
+    mutable header_state : header_state;
+    mutable header_index : int;
+    
+    mutable chunked : bool;
+    mutable connection_keep_alive : bool;
+    mutable connection_close : bool;
+    mutable connection_upgrade : bool;
+    mutable trailing : bool;
+    mutable upgrade : bool;
+
     callbacks : callbacks;
   }
 
-let make callbacks = { state = Start; nread = 0; callbacks = callbacks }
+let make callbacks =
+  {
+    state = Start;
+    nread = 0;
+    mark = 0;
+    count = 0;
+    content_length = -1;
+    header_state = General;
+    header_index = 0;
+    chunked = false;
+    connection_keep_alive = false;
+    connection_close = false;
+    connection_upgrade = false;
+    trailing = false;
+    upgrade = false;
+    callbacks = callbacks
+  }
 
 let is_alpha c =
   let l = Char.lowercase c in
@@ -251,458 +268,527 @@ let strict_check cond =
   if Config.strict && not cond then
     raise Strict
 
-let new_message flags =
-  if Config.strict && flags.connection_close then
-    Dead
-  else
-    Start
+let new_message parser =
+  parser.state <- if Config.strict && parser.connection_close then
+		    Dead
+		  else
+		    Start
 
 let digit ch = Char.code ch - Char.code '0'
 
-let rec parse_message_char callbacks data state p =
+let count_up parser =
+  parser.count <- parser.count + 1
+
+let count_down parser =
+  parser.count <- parser.count - 1
+
+let empty_flags parser =
+  parser.chunked <- false;
+  parser.connection_keep_alive <- false;
+  parser.connection_close <- false;
+  parser.connection_upgrade <- false;
+  parser.trailing <- false;
+  parser.upgrade <- false
+			 
+let rec parse_char parser data p =
+  let callbacks = parser.callbacks in
   let ch = String.get data p in
-  match state, ch with
+  match parser.state, ch with
   (* this state is used after a 'Connection: close' message
    * the parser will error out if it reads another message
    *)
   | Dead, '\r'
-  | Dead, '\n' -> Dead
+  | Dead, '\n' -> ()
   | Dead, _ -> raise ClosedConnection
-  | Start, '\r' -> Start
-  | Start, '\n' -> Start
+  | Start, '\r' -> ()
+  | Start, '\n' -> ()
   | Start, _ ->
      callbacks.on_message_begin ();
-     parse_message_char callbacks data MethodStart p
-  | MethodStart, ch when is_token ch -> Method (1, p)
+     parser.state <- MethodStart;
+     parse_char parser data p;
+  | MethodStart, ch when is_token ch ->
+     parser.state <- Method;
+     parser.count <- 1;
+     parser.mark <- p;
   | MethodStart, _ -> raise InvalidMethod
-  | Method (n, m), _ when n >= Config.max_method_size ->
-     raise InvalidMethod
-  | Method (n, m), ' ' ->
-     callbacks.on_method data m p;
-     SpacesBeforeUri
-  | Method (n, m), ch when is_token ch -> Method (n + 1, m)
-  | Method _, _ -> raise InvalidMethod
-  | SpacesBeforeUri, ' ' -> SpacesBeforeUri
-  | SpacesBeforeUri, '*' -> Asterisk p
-  | SpacesBeforeUri, ch when is_uri_char ch -> Uri (1, p)
+  | Method, _ when parser.count >= Config.max_method_size -> raise InvalidMethod
+  | Method, ' ' ->
+     callbacks.on_method data parser.mark p;
+     parser.state <- SpacesBeforeUri;
+  | Method, ch when is_token ch ->
+     count_up parser;
+  | Method, _ -> raise InvalidMethod
+  | SpacesBeforeUri, ' ' ->
+     parser.state <- SpacesBeforeUri;
+  | SpacesBeforeUri, '*' ->
+     parser.state <- Asterisk;
+     parser.mark <- p;
+  | SpacesBeforeUri, ch when is_uri_char ch ->
+     parser.state <- Uri;
+     parser.count <- 1;
+     parser.mark <- p;
   | SpacesBeforeUri, _ -> raise InvalidUri
-  | Asterisk m, ' ' ->
-     callbacks.on_uri data m p;
-     HttpStart
-  | Asterisk m, _ -> raise InvalidUri
-  | Uri (n, m), _ when n >= Config.max_uri_size ->
-     raise InvalidUri
-  | Uri (n, m), ' ' ->
-     callbacks.on_uri data m p;
-     HttpStart
-  | Uri (n, m), ch when is_uri_char ch -> Uri (n + 1, m)
-  | Uri (n, m), _ -> raise InvalidUri
-  | HttpStart, 'H' -> H
-  | HttpStart, ' ' -> HttpStart
+  | Asterisk, ' ' ->
+     callbacks.on_uri data parser.mark p;
+     parser.state <- HttpStart;
+  | Asterisk, _ -> raise InvalidUri
+  | Uri, _ when parser.count >= Config.max_uri_size -> raise InvalidUri
+  | Uri, ' ' ->
+     callbacks.on_uri data parser.mark p;
+     parser.state <- HttpStart;
+  | Uri, ch when is_uri_char ch ->
+     count_up parser;
+  | Uri, _ -> raise InvalidUri
+  | HttpStart, 'H' ->
+     parser.state <- H;
+  | HttpStart, ' ' ->
+     parser.state <- HttpStart;
   | HttpStart, _ -> raise InvalidConstant
   | H, ch ->
      strict_check (ch = 'T');
-     Ht
+     parser.state <- Ht;
   | Ht, ch ->
      strict_check (ch = 'T');
-     Htt
+     parser.state <- Htt;
   | Htt, ch ->
      strict_check (ch = 'P');
-     Http
+     parser.state <- Http;
   | Http, ch ->
      strict_check (ch = '/');
-     MajorFirst
-  | MajorFirst, ch when is_num ch -> Major (1, p)
+     parser.state <- MajorFirst;
+  | MajorFirst, ch when is_num ch ->
+     parser.state <- Major;
+     parser.count <- 1;
+     parser.mark <- p;
   | MajorFirst, _ -> raise InvalidVersion
-  | Major (n, m), _ when n >= Config.max_version_digit_size ->
-     raise InvalidVersion
-  | Major (n, m), '.' ->
-     callbacks.on_version_major data m p;
-     MinorFirst
-  | Major (n, m), ch when is_num ch -> Major (n + 1, m)
-  | Major _, _ -> raise InvalidVersion
-  | MinorFirst, ch when is_num ch -> Minor (1, p)
+  | Major, _ when parser.count >= Config.max_version_digit_size -> raise InvalidVersion
+  | Major, '.' ->
+     callbacks.on_version_major data parser.mark p;
+     parser.state <- MinorFirst;
+  | Major, ch when is_num ch ->
+     count_up parser;
+  | Major, _ -> raise InvalidVersion
+  | MinorFirst, ch when is_num ch ->
+     parser.state <- Minor;
+     parser.count <- 1;
+     parser.mark <- p;
   | MinorFirst, _ -> raise InvalidVersion
-  | Minor (n, m), _ when n >= Config.max_version_digit_size ->
-     raise InvalidVersion
-  | Minor (n, m), '\r' ->
-     callbacks.on_version_minor data m p;
-     LineAlmostDone
-  | Minor (n, m), '\n' ->
-     callbacks.on_version_minor data m p;
-     HeaderFieldStart (empty_flags, None)
-  | Minor (n, m), ch when is_num ch -> Minor (n + 1, m)
-  | Minor _, _ -> raise InvalidVersion
-  | LineAlmostDone, '\n' ->  HeaderFieldStart (empty_flags, None)
+  | Minor, _ when parser.count >= Config.max_version_digit_size -> raise InvalidVersion
+  | Minor, '\r' ->
+     callbacks.on_version_minor data parser.mark p;
+     parser.state <- LineAlmostDone;
+  | Minor, '\n' ->
+     callbacks.on_version_minor data parser.mark p;
+     parser.state <- HeaderFieldStart;
+     empty_flags parser;
+     parser.content_length <- -1;
+  | Minor, ch when is_num ch ->
+     count_up parser;
+  | Minor, _ -> raise InvalidVersion
+  | LineAlmostDone, '\n' ->
+     parser.state <- HeaderFieldStart;
+     empty_flags parser;
+     parser.content_length <- -1;
   | LineAlmostDone, _ -> raise LfExpected
-  | HeaderField (n, flags, cl, _, _), _
-  | HeaderValueDiscardWs (n, flags, cl, _), _
-  | HeaderValueDiscardWsAlmostDone (n, flags, cl, _), _
-  | HeaderValueDiscardLws (n, flags, cl, _), _
-  | HeaderValueStart (n, flags, cl, _), _
-  | HeaderValue (n, flags, cl, _, _), _
-  | HeaderValueLws (n, flags, cl, _), _
-  | HeaderAlmostDone (n, flags, cl, _), _
-       when n >= Config.max_header_size ->
-     raise HeaderOverflow;
-  | HeaderFieldStart (flags, cl), '\r' -> HeadersAlmostDone (flags, cl)
-  | HeaderFieldStart (flags, cl), '\n' ->
+  | HeaderField, _
+  | HeaderValueDiscardWs, _
+  | HeaderValueDiscardWsAlmostDone, _
+  | HeaderValueDiscardLws, _
+  | HeaderValueStart, _
+  | HeaderValue, _
+  | HeaderValueLws, _
+  | HeaderAlmostDone, _ when parser.count >= Config.max_header_size ->
+     raise HeaderOverflow
+  | HeaderFieldStart, '\r' ->
+     parser.state <- HeadersAlmostDone;
+  | HeaderFieldStart, '\n' ->
      (* they might be just sending \n instead of \r\n
       *  so this would be the second \n
       *  to denote the end of headers
       *)
-     parse_message_char callbacks data (HeadersAlmostDone (flags, cl)) p
-  | HeaderFieldStart (flags, cl), ch when not (is_token ch) ->
-     Printf.printf "invalid token: %d\n" (Char.code ch);
-     raise InvalidHeaderToken
-  | HeaderFieldStart (flags, cl), ch when token ch = 'c' ->
-     HeaderField (1, flags, cl, C, p)
-  | HeaderFieldStart (flags, cl), ch when token ch = 't' ->
-     HeaderField (1, flags, cl, MatchingTransferEncoding 0, p)
-  | HeaderFieldStart (flags, cl), ch when token ch = 'u' ->
-     HeaderField (1, flags, cl, MatchingUpgrade 0, p)
-  | HeaderFieldStart (flags, cl), _ ->
-     HeaderField (1, flags, cl, General, p)
-  | HeaderField (n, flags, cl, hs, m), ':' ->
-     callbacks.on_header_field data m p;
-     HeaderValueDiscardWs (n + 1, flags, cl, hs)
-  | HeaderField _, ch when not (is_token ch) -> Printf.printf "here\n%!"; raise InvalidHeaderToken
-  | HeaderField (n, flags, cl, General, m), _ ->
-     HeaderField (n + 1, flags, cl, General, m)
-  | HeaderField (n, flags, cl, C, m), ch when token ch = 'o' ->
-     HeaderField (n + 1, flags, cl, Co, m)
-  | HeaderField (n, flags, cl, Co, m), ch when token ch = 'n' ->
-     HeaderField (n + 1, flags, cl, Con, m)
-  | HeaderField (n, flags, cl, Con, m), ch when token ch = 'n' ->
-     HeaderField (n + 1, flags, cl, MatchingConnection 3, m)
-  | HeaderField (n, flags, cl, Con, m), ch when token ch = 't' ->
-     HeaderField (n + 1, flags, cl, MatchingContentLength 3, m)
-  | HeaderField (n, flags, cl, MatchingContentLength i, m), ch
-       when i > String.length connection - 1
-	    || token ch != String.get connection i ->
-     HeaderField (n + 1, flags, cl, General, m)
-  | HeaderField (n, flags, cl, MatchingContentLength i, m), _
-       when i = String.length connection - 2 ->
-     HeaderField (n + 1, flags, cl, ContentLength, m)
-  | HeaderField (n, flags, cl, MatchingConnection i, m), ch
-       when i > String.length connection - 1
-	    || token ch != String.get connection i ->
-     HeaderField (n + 1, flags, cl, General, m)
-  | HeaderField (n, flags, cl, MatchingConnection i, m), _
-       when i = String.length connection - 2->
-     HeaderField (n + 1, flags, cl, Connection, m)
-  | HeaderField (n, flags, cl, MatchingContentLength i, m), ch
-       when i > String.length content_length - 1
-	    || token ch != String.get content_length i ->
-     HeaderField (n + 1, flags, cl, General, m)
-  | HeaderField (n, flags, cl, MatchingContentLength i, m), _
-       when i = String.length content_length - 2 ->
-     HeaderField (n + 1, flags, cl, ContentLength, m)
-  | HeaderField (n, flags, cl, MatchingTransferEncoding i, m), ch
-       when i > String.length transfer_encoding - 1
-	    || token ch != String.get transfer_encoding i ->
-     HeaderField (n + 1, flags, cl, General, m)
-  | HeaderField (n, flags, cl, MatchingTransferEncoding i, m), _
-       when i = String.length transfer_encoding - 2 ->
-     HeaderField (n + 1, flags, cl, TransferEncoding, m)
-  | HeaderField (n, flags, cl, MatchingUpgrade i, m), ch
-       when i > String.length upgrade - 1
-	    || token ch != String.get upgrade i ->
-     HeaderField (n + 1, flags, cl, General, m)
-  | HeaderField (n, flags, cl, MatchingUpgrade i, m), _
-       when i = String.length upgrade - 2 ->
-     HeaderField (n + 1, flags, cl, Upgrade, m)
-  | HeaderField (n, flags, cl, Connection, m), ' '
-  | HeaderField (n, flags, cl, ContentLength, m), ' '
-  | HeaderField (n, flags, cl, TransferEncoding, m), ' '
-  | HeaderField (n, flags, cl, Upgrade, m), ' ' ->
-     HeaderField (n + 1, flags, cl, General, m)
-  | HeaderField (n, flags, cl, hs, m), _ ->
-     HeaderField (n + 1, flags, cl, hs, m)
-  | HeaderValueDiscardWs (n, flags, cl, hs), ' '
-  | HeaderValueDiscardWs (n, flags, cl, hs), '\t' ->
-     HeaderValueDiscardWs (n + 1, flags, cl, hs)
-  | HeaderValueDiscardWs (n, flags, cl, hs), '\r' ->
-     HeaderValueDiscardWsAlmostDone (n + 1, flags, cl, hs)
-  | HeaderValueDiscardWs (n, flags, cl, hs), '\n' ->
-     HeaderValueDiscardLws (n + 1, flags, cl, hs)
-  | HeaderValueDiscardWs (n, flags, cl, hs), _ ->
-     parse_message_char callbacks data (HeaderValueStart (n, flags, cl, hs)) p
-  | HeaderValueDiscardLws (n, flags, cl, hs), ' '
-  | HeaderValueDiscardLws (n, flags, cl, hs), '\t' ->
-     parse_message_char callbacks data (HeaderValueStart (n, flags, cl, hs)) p
-  | HeaderValueDiscardLws (n, flags, cl, ConnectionKeepAlive), _ ->
-     HeaderFieldStart ({ flags with connection_keep_alive = true }, cl)
-  | HeaderValueDiscardLws (n, flags, cl, ConnectionClose), _ ->
-     HeaderFieldStart ({ flags with connection_close = true }, cl)
-  | HeaderValueDiscardLws (n, flags, cl, TransferEncodingChunked), _ ->
-     HeaderFieldStart ({ flags with chunked = true }, cl)
-  | HeaderValueDiscardLws (n, flags, cl, ConnectionUpgrade), _ ->
-     HeaderFieldStart ({ flags with connection_upgrade = true }, cl)
-  | HeaderValueDiscardLws (n, flags, cl, _), _ ->
-     HeaderFieldStart (flags, cl)
-  | HeaderValueStart (n, flags, cl, Upgrade), _ ->
-     HeaderValue (n + 1, { flags with upgrade = true }, cl, General, p)
-  | HeaderValueStart (n, flags, cl, TransferEncoding), ch
-       when Char.lowercase ch = 'c' ->
-     HeaderValue (n + 1, flags, cl, MatchingTransferEncodingChunked 1, p)
-  | HeaderValueStart (n, flags, cl, TransferEncoding), _ ->
-     HeaderValue (n + 1, flags, cl, General, p)
-  | HeaderValueStart (n, flags, cl, ContentLength), ch when not (is_num ch) ->
-     raise InvalidContentLength
-  | HeaderValueStart (n, flags, _, ContentLength), ch ->
-     HeaderValue (n + 1, flags, Some (digit ch), ContentLength, p)
-  | HeaderValueStart (n, flags, cl, Connection), ch when Char.lowercase ch = 'k' ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionKeepAlive 1, p)
-  | HeaderValueStart (n, flags, cl, Connection), ch when Char.lowercase ch = 'c' ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionClose 1, p)
-  | HeaderValueStart (n, flags, cl, Connection), ch when Char.lowercase ch = 'u' ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionUpgrade 1, p)
-  | HeaderValueStart (n, flags, cl, Connection), ch ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionToken, p)
-  | HeaderValueStart (n, flags, cl, MatchingConnectionTokenStart), _ ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionTokenStart, p)
-  | HeaderValueStart (n, flags, cl, _), _ ->
-     HeaderValue (n + 1, flags, cl, General, p)
-  | HeaderValue (n, flags, cl, hs, m), '\r' ->
-     callbacks.on_header_value data m p;
-     HeaderAlmostDone (n + 1, flags, cl, hs)
-  | HeaderValue (n, flags, cl, hs, m), '\n' ->
-     callbacks.on_header_value data m p;
-     parse_message_char callbacks data (HeaderAlmostDone (n, flags, cl, hs)) p
-  | HeaderValue (n, flags, cl, General, m), ch ->
-     HeaderValue (n + 1, flags, cl, General, m)
-  | HeaderValue (n, flags, Some cl, ContentLength, m), ' ' ->
-     HeaderValue (n + 1, flags, Some cl, ContentLength, m)
-  | HeaderValue (n, flags, Some cl, ContentLength, m), ch when not (is_num ch) ->
-     raise InvalidContentLength
-  | HeaderValue (n, flags, Some cl, ContentLength, m), ch ->
-     let content_length = 10 * cl + digit ch in
-     if Config.max_content_size < content_length then
-       raise InvalidContentLength;
-     HeaderValue (n + 1, flags, Some content_length, ContentLength, m)
-  | HeaderValue (n, flags, cl, MatchingTransferEncodingChunked i, m), ch
-       when i > String.length chunked - 1 ||
-	      Char.lowercase ch != String.get chunked i ->
-     HeaderValue (n + 1, flags, cl, General, m)
-  | HeaderValue (n, flags, cl, MatchingTransferEncodingChunked i, m), _
-       when i == String.length chunked - 2 ->
-     HeaderValue (n + 1, flags, cl, TransferEncodingChunked, m)
-  | HeaderValue (n, flags, cl, MatchingTransferEncodingChunked i, m), _ ->
-     let header_state = MatchingTransferEncodingChunked (i + 1) in
-     HeaderValue (n + 1, flags, cl, header_state, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionTokenStart, m), ch
-       when Char.lowercase ch = 'k' ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionKeepAlive 1, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionTokenStart, m), ch
-       when Char.lowercase ch = 'c' ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionClose 1, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionTokenStart, m), ch
-       when Char.lowercase ch = 'u' ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionUpgrade 1, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionTokenStart, m), ch
-       when strict_token ch != invalid_token ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionToken, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionTokenStart, m), ' '
-  | HeaderValue (n, flags, cl, MatchingConnectionTokenStart, m), '\t' ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionTokenStart, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionTokenStart, m), _ ->
-     HeaderValue (n + 1, flags, cl, General, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionKeepAlive i, m), ch
-       when i > String.length keep_alive - 1 ||
-	      Char.lowercase ch != String.get keep_alive i ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionToken, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionKeepAlive i, m), _
-       when i = String.length keep_alive - 2 ->
-     HeaderValue (n + 1, flags, cl, ConnectionKeepAlive, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionKeepAlive i, m), _ ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionKeepAlive (i + 1), m)
-  | HeaderValue (n, flags, cl, MatchingConnectionClose i, m), ch
-       when i > String.length close - 1 ||
-	      Char.lowercase ch != String.get close i ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionToken, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionClose i, m), _
-       when i = String.length close - 2 ->
-     HeaderValue (n + 1, flags, cl, ConnectionClose, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionClose i, m), _ ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionClose (i + 1), m)
-  | HeaderValue (n, flags, cl, MatchingConnectionUpgrade i, m), ch
-       when i > String.length upgrade - 1 ||
-	      Char.lowercase ch != String.get upgrade i ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionToken, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionUpgrade i, m), _
-       when i = String.length upgrade - 2 ->
-     HeaderValue (n + 1, flags, cl, ConnectionUpgrade, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionUpgrade i, m), _ ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionUpgrade (i + 1), m)
-  | HeaderValue (n, flags, cl, MatchingConnectionToken, m), ',' ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionTokenStart, m)
-  | HeaderValue (n, flags, cl, MatchingConnectionToken, m), _ ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionToken, m)
-  | HeaderValue (n, flags, cl, TransferEncodingChunked, m), ' ' ->
-     HeaderValue (n + 1, flags, cl, TransferEncodingChunked, m)
-  | HeaderValue (n, flags, cl, TransferEncodingChunked, m), _ ->
-     HeaderValue (n + 1, flags, cl, General, m)
-  | HeaderValue (n, flags, cl, ConnectionKeepAlive, m), ',' ->
-     let flags = { flags with connection_keep_alive = true } in
-     HeaderValue (n + 1, flags, cl, MatchingConnectionTokenStart, m)
-  | HeaderValue (n, flags, cl, ConnectionClose, m), ',' ->
-     let flags = { flags with connection_close = true } in
-     HeaderValue (n + 1, flags, cl, MatchingConnectionTokenStart, m)
-  | HeaderValue (n, flags, cl, ConnectionUpgrade, m), ',' ->
-     let flags = { flags with connection_upgrade = true } in
-     HeaderValue (n + 1, flags, cl, MatchingConnectionTokenStart, m)
-  | HeaderValue (n, flags, cl, ConnectionKeepAlive, m), ' ' ->
-     HeaderValue (n + 1, flags, cl, ConnectionKeepAlive, m)
-  | HeaderValue (n, flags, cl, ConnectionClose, m), ' ' ->
-     HeaderValue (n + 1, flags, cl, ConnectionClose, m)
-  | HeaderValue (n, flags, cl, ConnectionUpgrade, m), ' ' ->
-     HeaderValue (n + 1, flags, cl, ConnectionUpgrade, m)
-  | HeaderValue (n, flags, cl, ConnectionKeepAlive, m), _
-  | HeaderValue (n, flags, cl, ConnectionClose, m), _
-  | HeaderValue (n, flags, cl, ConnectionUpgrade, m), _ ->
-     HeaderValue (n + 1, flags, cl, MatchingConnectionToken, m)
-  | HeaderValue (n, flags, cl, _, m), _ ->
-     HeaderValue (n + 1, flags, cl, General, m)
-  | HeaderAlmostDone (n, flags, cl, hs), '\n' ->
-     HeaderValueLws (n + 1, flags, cl, hs)
-  | HeaderAlmostDone (n, flags, cl, hs), _ ->
+     parser.state <- HeadersAlmostDone;
+     parse_char parser data p;
+  | HeaderFieldStart, ch when not (is_token ch) -> raise InvalidHeaderToken
+  | HeaderFieldStart, ch when token ch = 'c' ->
+     parser.state <- HeaderField;
+     parser.count <- 1;
+     parser.mark <- p;
+     parser.header_state <- C;
+  | HeaderFieldStart, ch when token ch = 't' ->
+     parser.state <- HeaderField;
+     parser.count <- 1;
+     parser.mark <- p;
+     parser.header_state <- MatchingTransferEncoding;
+     parser.header_index <- 0;
+  | HeaderFieldStart, ch when token ch = 'u' ->
+     parser.state <- HeaderField;
+     parser.count <- 1;
+     parser.mark <- p;
+     parser.header_state <- MatchingUpgrade;
+     parser.header_index <- 0;
+  | HeaderFieldStart, _ ->
+     parser.state <- HeaderField;
+     parser.count <- 1;
+     parser.mark <- p;
+     parser.header_state <- General;
+  | HeaderField, ':' ->
+     callbacks.on_header_field data parser.mark p;
+     parser.state <- HeaderValueDiscardWs;
+     count_up parser;
+  | HeaderField, ch when not (is_token ch) -> raise InvalidHeaderToken
+  | HeaderField, _ ->
+     count_up parser;
+     begin
+       match parser.header_state, ch with
+       | General, _ -> ()
+       | C, ch when token ch = 'o' ->
+	  parser.header_state <- Co;
+       | Co, ch when token ch = 'n' ->
+	  parser.header_state <- Con;
+       | Con, ch when token ch = 't' ->
+	  parser.header_state <- MatchingContentLength;
+	  parser.header_index <- 3;
+       | MatchingContentLength, ch
+	    when parser.header_index > String.length connection - 1
+		 || token ch != String.get connection parser.header_index ->
+	  parser.header_state <- General;
+       | MatchingContentLength, _
+	    when parser.header_index = String.length connection - 2 ->
+	  parser.header_state <- ContentLength
+       | MatchingConnection, ch
+	    when parser.header_index > String.length connection - 1
+		 || token ch != String.get connection parser.header_index ->
+	  parser.header_state <- General;
+       | MatchingConnection, _
+	    when parser.header_index = String.length connection - 2->
+	  parser.header_state <- Connection;
+       | MatchingContentLength, ch
+	    when parser.header_index > String.length content_length - 1
+		 || token ch != String.get content_length parser.header_index ->
+	  parser.header_state <- General;
+       | MatchingContentLength, _
+	    when parser.header_index = String.length content_length - 2 ->
+	  parser.header_state <- ContentLength;
+       | MatchingTransferEncoding, ch
+	    when parser.header_index > String.length transfer_encoding - 1
+		 || token ch != String.get transfer_encoding parser.header_index ->
+	  parser.header_state <- General;
+       | MatchingTransferEncoding, _
+	    when parser.header_index = String.length transfer_encoding - 2 ->
+	  parser.header_state <- TransferEncoding;
+       | MatchingUpgrade, ch
+	    when parser.header_index > String.length upgrade - 1
+		 || token ch != String.get upgrade parser.header_index ->
+	  parser.header_state <- General;
+       | MatchingUpgrade, _
+	    when parser.header_index = String.length upgrade - 2 ->
+	  parser.header_state <- Upgrade;
+       | Connection, ' '
+       | ContentLength, ' '
+       | TransferEncoding, ' '
+       | Upgrade, ' ' ->
+	  parser.header_state <- General;
+       | _, _ -> ()
+     end
+  | HeaderValueDiscardWs, ' '
+  | HeaderValueDiscardWs, '\t' ->
+     count_up parser;
+  | HeaderValueDiscardWs, '\r' ->
+     parser.state <- HeaderValueDiscardWsAlmostDone;
+     count_up parser;
+  | HeaderValueDiscardWs, '\n' ->
+     parser.state <- HeaderValueDiscardLws;
+     count_up parser;
+  | HeaderValueDiscardWs, _ ->
+     parser.state <- HeaderValueStart;
+     parse_char parser data p;
+  | HeaderValueDiscardLws, ' '
+  | HeaderValueDiscardLws, '\t' ->
+     parser.state <- HeaderValueStart;
+     parse_char parser data p;
+  | HeaderValueDiscardLws, _ ->
+     parser.state <- HeaderFieldStart;
+     begin
+       match parser.header_state with
+       | ConnectionKeepAlive ->
+	  parser.connection_keep_alive <- true;
+       | ConnectionClose ->
+	  parser.connection_close <- true;
+       | TransferEncodingChunked ->
+	  parser.chunked <- true;
+       | ConnectionUpgrade ->
+	  parser.connection_upgrade <- true;
+       | _ -> ()
+     end;
+  | HeaderValueStart, _ ->
+     parser.state <- HeaderValue;
+     count_up parser;
+     begin
+       match parser.header_state with
+       | Upgrade ->
+	  parser.upgrade <- true;
+	  parser.header_state <- General;
+       | TransferEncoding when Char.lowercase ch = 'c' ->
+	  parser.header_state <- MatchingTransferEncodingChunked;
+	  parser.header_index <- 1;
+       | TransferEncoding ->
+	  parser.header_state <- General
+       | ContentLength when not (is_num ch) -> raise InvalidContentLength
+       | ContentLength ->
+	  parser.content_length <- digit ch;
+       | Connection when Char.lowercase ch = 'k' ->
+	  parser.header_state <- MatchingConnectionKeepAlive;
+	  parser.header_index <- 1;
+       | Connection when Char.lowercase ch = 'c' ->
+	  parser.header_state <- MatchingConnectionClose;
+	  parser.header_index <- 1;
+       | Connection when Char.lowercase ch = 'u' ->
+	  parser.header_state <- MatchingConnectionUpgrade;
+	  parser.header_index <- 1;
+       | Connection ->
+	  parser.header_state <- MatchingConnectionToken;
+       | MatchingConnectionTokenStart ->
+	  parser.header_state <- MatchingConnectionTokenStart;
+       | _ ->
+	  parser.header_state <- General;
+     end;
+  | HeaderValue, '\r' ->
+     callbacks.on_header_value data parser.mark p;
+     parser.state <- HeaderAlmostDone;
+     count_up parser;
+  | HeaderValue, '\n' ->
+     callbacks.on_header_value data parser.mark p;
+     parser.state <- HeaderAlmostDone;
+     parse_char parser data p;
+  | HeaderValue, _ ->
+     count_up parser;
+     begin
+       match parser.header_state, ch with
+       | General, _ -> ()
+       | ContentLength, ' ' when parser.content_length > 0 -> ()
+       | ContentLength, ch when not (is_num ch) && parser.content_length > 0 ->
+	  raise InvalidContentLength
+       | ContentLength, ch when parser.content_length > 0 ->
+	  let content_length = 10 * parser.content_length + digit ch in
+	  if Config.max_content_size < content_length then
+	    raise InvalidContentLength;
+	  parser.content_length <- content_length;
+       | MatchingTransferEncodingChunked, ch
+	    when parser.header_index > String.length chunked - 1 ||
+		   Char.lowercase ch != String.get chunked parser.header_index ->
+	  parser.header_state <- General;
+       | MatchingTransferEncodingChunked, _
+	    when parser.header_index == String.length chunked - 2 ->
+	  parser.header_state <- TransferEncodingChunked;
+       | MatchingTransferEncodingChunked, _ ->
+	  parser.header_index <- parser.header_index + 1;
+       | MatchingConnectionTokenStart, ch when Char.lowercase ch = 'k' ->
+	  parser.header_state <- MatchingConnectionKeepAlive;
+	  parser.header_index <- 1;
+       | MatchingConnectionTokenStart, ch when Char.lowercase ch = 'c' ->
+	  parser.header_state <- MatchingConnectionClose;
+	  parser.header_index <- 1;
+       | MatchingConnectionTokenStart, ch when Char.lowercase ch = 'u' ->
+	  parser.header_state <- MatchingConnectionUpgrade;
+	  parser.header_index <- 1;
+       | MatchingConnectionTokenStart, ch when strict_token ch != invalid_token ->
+	  parser.header_state <- MatchingConnectionToken;
+       | MatchingConnectionTokenStart, ' '
+       | MatchingConnectionTokenStart, '\t' -> ()
+       | MatchingConnectionTokenStart, _ ->
+	  parser.header_state <- General;
+       | MatchingConnectionKeepAlive, ch
+	    when parser.header_index > String.length keep_alive - 1 ||
+		   Char.lowercase ch != String.get keep_alive parser.header_index ->
+	  parser.header_state <- MatchingConnectionToken;
+       | MatchingConnectionKeepAlive, _
+	    when parser.header_index = String.length keep_alive - 2 ->
+	  parser.header_state <- ConnectionKeepAlive;
+       | MatchingConnectionKeepAlive, _ ->
+	  parser.header_index <- parser.header_index + 1;
+       | MatchingConnectionClose, ch
+	    when parser.header_index > String.length close - 1 ||
+		   Char.lowercase ch != String.get close parser.header_index ->
+	  parser.header_state <- MatchingConnectionToken;
+       | MatchingConnectionClose, _
+	    when parser.header_index = String.length close - 2 ->
+	  parser.header_state <- ConnectionClose;
+       | MatchingConnectionClose, _ ->
+	  parser.header_index <- parser.header_index + 1;
+       | MatchingConnectionUpgrade, ch
+	    when parser.header_index > String.length upgrade - 1 ||
+		   Char.lowercase ch != String.get upgrade parser.header_index ->
+	  parser.header_state <- MatchingConnectionToken;
+       | MatchingConnectionUpgrade, _
+	    when parser.header_index = String.length upgrade - 2 ->
+	  parser.header_state <- ConnectionUpgrade;
+       | MatchingConnectionUpgrade, _ ->
+	  parser.header_index <- parser.header_index + 1;
+       | MatchingConnectionToken, ',' ->
+	  parser.header_state <- MatchingConnectionTokenStart;
+       | MatchingConnectionToken, _ ->
+	  parser.header_state <- MatchingConnectionToken;
+       | TransferEncodingChunked, ' ' -> ()
+       | TransferEncodingChunked, _ ->
+	  parser.header_state <- General;
+       | ConnectionKeepAlive, ',' ->
+	  parser.header_state <- MatchingConnectionTokenStart;
+	  parser.connection_keep_alive <- true;
+       | ConnectionClose, ',' ->
+	  parser.header_state <- MatchingConnectionTokenStart;
+	  parser.connection_close <- true;
+       | ConnectionUpgrade, ',' ->
+	  parser.header_state <- MatchingConnectionTokenStart;
+	  parser.connection_upgrade <- true;
+       | ConnectionKeepAlive, ' ' ->
+	  parser.header_state <- ConnectionKeepAlive;
+       | ConnectionClose, ' ' ->
+	  parser.header_state <- ConnectionClose;
+       | ConnectionUpgrade, ' ' ->
+	  parser.header_state <- ConnectionUpgrade;
+       | ConnectionKeepAlive, _
+       | ConnectionClose, _
+       | ConnectionUpgrade, _ ->
+	  parser.header_state <- MatchingConnectionToken;
+       | _, _ ->
+	  parser.header_state <- General;
+     end;
+  | HeaderAlmostDone, '\n' ->
+     parser.state <- HeaderValueLws;
+     count_up parser;
+  | HeaderAlmostDone, _ ->
      if Config.strict then
        raise Strict;
-     HeaderValueLws (n + 1, flags, cl, hs)
-  | HeaderValueLws (n, flags, cl, hs), ' '
-  | HeaderValueLws (n, flags, cl, hs), '\t' ->
-     parse_message_char callbacks data (HeaderValueStart (n, flags, cl, hs)) p
-  | HeaderValueLws (n, flags, cl, ConnectionKeepAlive), _ ->
-     let flags = { flags with connection_keep_alive = true } in
-     parse_message_char callbacks data (HeaderFieldStart (flags, cl)) p
-  | HeaderValueLws (n, flags, cl, ConnectionClose), _ ->
-     let flags = { flags with connection_close = true } in
-     parse_message_char callbacks data (HeaderFieldStart (flags, cl)) p
-  | HeaderValueLws (n, flags, cl, TransferEncodingChunked), _ ->
-     let flags = { flags with chunked = true } in
-     parse_message_char callbacks data (HeaderFieldStart (flags, cl)) p
-  | HeaderValueLws (n, flags, cl, ConnectionUpgrade), _ ->
-     let flags = { flags with connection_upgrade = true } in
-     parse_message_char callbacks data (HeaderFieldStart (flags, cl)) p
-  | HeaderValueLws (n, flags, cl, _), _ ->
-     parse_message_char callbacks data (HeaderFieldStart (flags, cl)) p
-  | HeaderValueDiscardWsAlmostDone (n, flags, cl, hs), ch ->
+     parser.state <- HeaderValueLws;
+     count_up parser;
+  | HeaderValueLws, ' '
+  | HeaderValueLws, '\t' ->
+     parser.state <- HeaderValueStart;
+     parse_char parser data p;
+  | HeaderValueLws, _ ->
+     begin
+       match parser.header_state with
+       | ConnectionKeepAlive ->
+	  parser.connection_keep_alive <- true;
+       | ConnectionClose ->
+	  parser.connection_close <- true;
+       | TransferEncodingChunked ->
+	  parser.chunked <- true;
+       | ConnectionUpgrade ->
+	  parser.connection_upgrade <- true;
+       | _ -> ()
+     end;
+     parser.state <- HeaderFieldStart;
+     parse_char parser data p;
+  | HeaderValueDiscardWsAlmostDone, ch ->
      strict_check (ch = '\n');
-     HeaderValueDiscardLws (n, flags, cl, hs)
-  | HeadersAlmostDone (flags, cl), ch when flags.trailing ->
+     parser.state <- HeaderValueDiscardLws;
+  | HeadersAlmostDone, ch when parser.trailing ->
      strict_check (ch = '\n');
      callbacks.on_chunk_complete ();
-     parse_message_char callbacks data MessageDone p
-  | HeadersAlmostDone (flags, cl), ch ->
+     parser.state <- MessageDone;
+     parse_char parser data p;
+  | HeadersAlmostDone, ch ->
      strict_check (ch = '\n');
      callbacks.on_headers_complete ();
-     parse_message_char callbacks data (HeadersDone (flags, cl)) p
-  | HeadersDone ({ upgrade = true; connection_upgrade = true; _ } as flags, _), _
-  | HeadersDone ({ chunked = true; _ } as flags, Some _), _ ->
+     parser.state <- HeadersDone;
+     parse_char parser data p;
+  | HeadersDone, _
+  | HeadersDone, _
+       when (parser.upgrade && parser.connection_upgrade)
+	    || (parser.chunked && parser.content_length > 0) ->
      (* Exit, the rest of the message is in a different protocol. *)
      callbacks.on_message_complete ();
-     new_message flags
-  | HeadersDone ({ chunked = true; _ }, _), _ -> ChunkSizeStart
-  | HeadersDone (flags, Some 0), _
-  | HeadersDone (flags, None), _ ->
+     new_message parser;
+  | HeadersDone, _ when parser.chunked ->
+     parser.state <- ChunkSizeStart;
+  | HeadersDone, _ when parser.content_length <= 0 ->
      callbacks.on_message_complete ();
-     new_message flags
-  | HeadersDone (flags, Some cl), _ -> BodyIdentity (cl, p)
-  | BodyIdentity (0, m), _ ->
-     callbacks.on_body data m (p - 1);
-     parse_message_char callbacks data MessageDone p
-  | BodyIdentity (i, m), _ -> BodyIdentity (i - 1, m)
-  | BodyIdentityEof m, _ -> BodyIdentityEof m
+     new_message parser;
+  | HeadersDone, _ ->
+     parser.state <- BodyIdentity;
+  | BodyIdentity, _ when parser.count = 0 ->
+     callbacks.on_body data parser.mark (p - 1);
+     parser.state <- MessageDone;
+     parse_char parser data p;
+  | BodyIdentity, _ ->
+     count_down parser;
+  | BodyIdentityEof, _ -> ()
   | MessageDone, _ ->
      callbacks.on_message_complete ();
-     MessageDone
   | ChunkSizeStart, ch ->
      let unhex_val = unhex ch in
      if unhex_val = -1 then
        raise InvalidChunkSize;
-     ChunkSize unhex_val
-  | ChunkSize size, '\r' -> ChunkSizeAlmostDone size
-  | ChunkSize size, ';'
-  | ChunkSize size, ' ' -> ChunkParameters size
-  | ChunkSize size, ch ->
+     parser.state <- ChunkSize;
+     parser.count <- unhex_val;
+  | ChunkSize, '\r' ->
+     parser.state <- ChunkSizeAlmostDone;
+  | ChunkSize, ';'
+  | ChunkSize, ' ' ->
+     parser.state <- ChunkParameters;
+  | ChunkSize, ch ->
      let unhex_val = unhex ch in
      if unhex_val = -1 then
        raise InvalidChunkSize;
-     let size = 16 * size + unhex_val in
+     let size = 16 * parser.count + unhex_val in
      if Config.max_chunk_size < size then
        raise InvalidChunkSize;
-     ChunkSize size
-  | ChunkParameters size, '\r' -> ChunkSizeAlmostDone size
-  | ChunkParameters size, _ -> ChunkParameters size
-  | ChunkSizeAlmostDone 0, ch ->
+     parser.count <- size;
+  | ChunkParameters, '\r' ->
+     parser.state <- ChunkSizeAlmostDone;
+  | ChunkParameters, _ ->
+     parser.state <- ChunkParameters;
+  | ChunkSizeAlmostDone, ch when parser.count = 0 ->
      strict_check (ch = '\n');
      callbacks.on_chunk_header ();
-     HeaderFieldStart (trailing_flags, None)
-  | ChunkSizeAlmostDone size, ch ->
+     parser.state <- HeaderFieldStart;
+     empty_flags parser;
+     parser.trailing <- true;
+     parser.content_length <- -1;
+  | ChunkSizeAlmostDone, ch ->
      strict_check (ch = '\n');
      callbacks.on_chunk_header ();
-     ChunkData (size, p)
-  | ChunkData (0, m), ch ->
-     ChunkDataAlmostDone m
-  | ChunkData (size, m), ch ->
-     ChunkData (size - 1, m)
-  | ChunkDataAlmostDone m, ch ->
+     parser.state <- ChunkData;
+     parser.mark <- p;
+  | ChunkData, ch when parser.count = 0 ->
+     parser.state <- ChunkDataAlmostDone;
+  | ChunkData, ch ->
+     count_down parser;
+  | ChunkDataAlmostDone, ch ->
      strict_check (ch = '\r');
-     callbacks.on_body data m p;
-     ChunkDataDone
+     callbacks.on_body data parser.mark p;
+     parser.state <- ChunkDataDone;
   | ChunkDataDone, ch ->
      strict_check (ch = '\n');
      callbacks.on_chunk_complete ();
-     ChunkSizeStart
+     parser.state <- ChunkSizeStart
 				   
 let reset_mark parser data p =
-  let state = parser.state in
   let callbacks = parser.callbacks in
   let p = p + 1 in
-  match state with
-  | Method (n, m) ->
-     callbacks.on_method data m p;
-     Method (n, 0)		 
-  | Asterisk m ->
-     Asterisk 0
-  | Uri (n, m) ->
-     callbacks.on_uri data m p;
-     Uri (n, 0)
-  | Major (n, m) ->
-     callbacks.on_version_major data m p;
-     Major (n, 0)
-  | Minor (n, m) ->
-     callbacks.on_version_minor data m p;
-     Minor (n, 0)				
-  | HeaderField (n, f, cl, hs, m) ->
-     callbacks.on_header_field data m p;
-     HeaderField (n, f, cl, hs, 0)
-  | HeaderValue (n, f, cl, hs, m) ->
-     callbacks.on_header_value data m p;
-     HeaderValue (n, f, cl, hs, 0)
-  | ChunkData (s, m) ->
-     callbacks.on_body data m p;
-     ChunkData (s, 0)
-  | ChunkDataAlmostDone m ->
-     ChunkDataAlmostDone 0
-  | BodyIdentity (i, m) ->
-     callbacks.on_body data m p;
-     BodyIdentity (i, 0)
-  | BodyIdentityEof m ->
-     callbacks.on_body data m p;
-     BodyIdentityEof 0
-  | s -> s
+  begin
+    match parser.state with
+    | Method -> callbacks.on_method data parser.mark p;
+    | Uri -> callbacks.on_uri data parser.mark p;
+    | Major -> callbacks.on_version_major data parser.mark p;
+    | Minor -> callbacks.on_version_minor data parser.mark p;
+    | HeaderField -> callbacks.on_header_field data parser.mark p;
+    | HeaderValue -> callbacks.on_header_value data parser.mark p;
+    | ChunkData -> callbacks.on_body data parser.mark p;
+    | BodyIdentity -> callbacks.on_body data parser.mark p;
+    | BodyIdentityEof -> callbacks.on_body data parser.mark p;
+    | _ -> ()
+  end;
+  parser.mark <- 0
 
 let execute parser data len =
-  let last_place = len - 1 in
-  let places = 0 -- last_place in
-  let parse_char = parse_message_char parser.callbacks data in
-  let state = fold parse_char parser.state places in
-  parser.state <- state;
+  let last = len - 1 in
+  for i = 0 to last do
+    parse_char parser data i
+  done;
   parser.nread <- parser.nread + len;
-  let state = reset_mark parser data last_place in
-  parser.state <- state
+  reset_mark parser data last
 
 let is_message_done parser =
   match parser.state with
@@ -713,40 +799,40 @@ let state_to_string = function
   | Dead -> "Dead"
   | Start -> "Start"
   | MethodStart -> "MethodStart"
-  | Method _ -> "Method"
+  | Method -> "Method"
   | SpacesBeforeUri -> "SpacesBeforeUri"
-  | Asterisk _ -> "Asterisk"
-  | Uri _ -> "Uri"
+  | Asterisk -> "Asterisk"
+  | Uri -> "Uri"
   | HttpStart -> "HttpStart"
   | H -> "H"
   | Ht -> "Ht"
   | Htt -> "Htt"
   | Http -> "Http"
   | MajorFirst -> "MajorFirst"
-  | Major _ -> "Major"
+  | Major -> "Major"
   | MinorFirst -> "MinorFirst"
-  | Minor _ -> "Minor"
+  | Minor -> "Minor"
   | LineAlmostDone -> "LineAlmostDone"
-  | HeaderFieldStart _ -> "HeaderFieldStart"
-  | HeaderField _ -> "HeaderField"
-  | HeaderValueDiscardWs _ -> "HeaderValueDiscardWs"
-  | HeaderValueDiscardWsAlmostDone _ -> "HeaderValueDiscardWsAlmostDone"
-  | HeaderValueDiscardLws _ -> "HeaderValueDiscardLws"
-  | HeaderValueStart _ -> "HeaderValueStart"
-  | HeaderValue _ -> "HeaderValue"
-  | HeaderValueLws _ -> "HeaderValueLws"
-  | HeaderAlmostDone _ -> "HeaderAlmostDone"
+  | HeaderFieldStart -> "HeaderFieldStart"
+  | HeaderField -> "HeaderField"
+  | HeaderValueDiscardWs -> "HeaderValueDiscardWs"
+  | HeaderValueDiscardWsAlmostDone -> "HeaderValueDiscardWsAlmostDone"
+  | HeaderValueDiscardLws -> "HeaderValueDiscardLws"
+  | HeaderValueStart -> "HeaderValueStart"
+  | HeaderValue -> "HeaderValue"
+  | HeaderValueLws -> "HeaderValueLws"
+  | HeaderAlmostDone -> "HeaderAlmostDone"
   | ChunkSizeStart -> "ChunkSizeStart"
-  | ChunkSize _ -> "ChunkSize"
-  | ChunkParameters _ -> "ChunkParameters"
-  | ChunkSizeAlmostDone _ -> "ChunkSizeAlmostDone"
-  | HeadersAlmostDone _ -> "HeadersAlmostDone"
-  | HeadersDone _ -> "HeadersDone"
-  | ChunkData _ -> "ChunkData"
-  | ChunkDataAlmostDone _ -> "ChunkDataAlmostDone"
+  | ChunkSize -> "ChunkSize"
+  | ChunkParameters -> "ChunkParameters"
+  | ChunkSizeAlmostDone -> "ChunkSizeAlmostDone"
+  | HeadersAlmostDone -> "HeadersAlmostDone"
+  | HeadersDone -> "HeadersDone"
+  | ChunkData -> "ChunkData"
+  | ChunkDataAlmostDone -> "ChunkDataAlmostDone"
   | ChunkDataDone -> "ChunkDataDone"
-  | BodyIdentity _ -> "BodyIdentity"
-  | BodyIdentityEof _ -> "BodyIdentityEof"
+  | BodyIdentity -> "BodyIdentity"
+  | BodyIdentityEof -> "BodyIdentityEof"
   | MessageDone -> "MessageDone"
 	  
 let to_string parser =
