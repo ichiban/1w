@@ -26,6 +26,7 @@ setup.log
 # build
 ._d/
 1w
+gmon.out
 
 # Vagrant
 .vagrant/

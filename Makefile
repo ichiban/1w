@@ -1,3 +1,5 @@
+.PHONY: prof
+
 RESULT = 1w
 SOURCES = \
   config.ml \
@@ -14,10 +16,13 @@ PACKS = \
   lwt.unix \
   lwt.ppx \
   uri
-OCAMLFLAGS = -g
-OCAMLLDFLAGS = -g
+OCAMLFLAGS =
+OCAMLLDFLAGS = -p
 
 all: native-code
 
 OCAMLMAKEFILE = OCamlMakefile
 include $(OCAMLMAKEFILE)
+
+prof: all
+	gprof ./$(RESULT) | less
