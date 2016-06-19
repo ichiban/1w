@@ -353,7 +353,6 @@ let rec parse_message_char callbacks data state p =
       *)
      parse_message_char callbacks data (HeadersAlmostDone (flags, cl)) p
   | HeaderFieldStart (flags, cl), ch when not (is_token ch) ->
-     Printf.printf "invalid token: %d\n" (Char.code ch);
      raise InvalidHeaderToken
   | HeaderFieldStart (flags, cl), ch when token ch = 'c' ->
      HeaderField (1, flags, cl, C, p)
@@ -366,7 +365,8 @@ let rec parse_message_char callbacks data state p =
   | HeaderField (n, flags, cl, hs, m), ':' ->
      callbacks.on_header_field data m p;
      HeaderValueDiscardWs (n + 1, flags, cl, hs)
-  | HeaderField _, ch when not (is_token ch) -> Printf.printf "here\n%!"; raise InvalidHeaderToken
+  | HeaderField _, ch when not (is_token ch) ->
+     raise InvalidHeaderToken
   | HeaderField (n, flags, cl, General, m), _ ->
      HeaderField (n + 1, flags, cl, General, m)
   | HeaderField (n, flags, cl, C, m), ch when token ch = 'o' ->
